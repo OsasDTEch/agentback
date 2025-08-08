@@ -1,34 +1,9 @@
-from goplan.backend.app.api.accs import get_access_token
 import requests
-from datetime import datetime, date, timezone
-
-
-def get_city_or_airport_code(keyword):
-    """
-    Search IATA code for flights (CITY or AIRPORT).
-    Automatically picks the best match from Amadeus data.
-    Returns tuple: (iataCode, countryCode)
-    """
-    token = get_access_token()
-    url = "https://test.api.amadeus.com/v1/reference-data/locations"
-    headers = {"Authorization": f"Bearer {token}"}
-    params = {"keyword": keyword, "subType": "AIRPORT,CITY"}
-
-    response = requests.get(url, headers=headers, params=params)
-    response.raise_for_status()
-    data = response.json().get("data", [])
-
-    if not data:
-        raise ValueError(f"No location found for '{keyword}'")
-
-    # Prefer exact match ignoring case
-    for item in data:
-        if item["name"].lower() == keyword.lower():
-            return item["iataCode"], item.get("address", {}).get("countryCode")
-
-    # Fallback: return first result
-    first = data[0]
-    return first["iataCode"], first.get("address", {}).get("countryCode")
+from dotenv import load_dotenv
+from datetime import datetime, timezone
+load_dotenv()
+AVIATIONSTACK_API_KEY = os.getenv('AVIATION_APIKEY')
+BASE_URL = "http://api.aviationstack.com/v1"
 
 
 def validate_date(date_string):
@@ -47,108 +22,60 @@ def validate_date(date_string):
         raise ValueError(f"Invalid date format '{date_string}'. Use YYYY-MM-DD format. {str(e)}")
 
 
-def search_flights(origin_name, destination_name, depart_date, return_date,
-                   adults=1, max_price=None):
+def search_flights(origin_iata, destination_iata, depart_date):
     """
-    Search flights between two cities/airports using Amadeus API.
-    - max_price is optional
-    - Automatically detects country codes
-    - Validates dates are in the future
+    Search flights using Aviationstack API.
+    Note: This only shows live/historical flights, NOT booking/prices.
     """
     try:
-        # Validate dates first
         validate_date(depart_date)
-        validate_date(return_date)
-
-        # Validate that return date is after departure date
-        dep_date = datetime.strptime(depart_date, '%Y-%m-%d').date()
-        ret_date = datetime.strptime(return_date, '%Y-%m-%d').date()
-
-        if ret_date <= dep_date:
-            raise ValueError("Return date must be after departure date")
-
-        # Get IATA codes
-        origin_code, origin_country = get_city_or_airport_code(origin_name)
-        destination_code, destination_country = get_city_or_airport_code(destination_name)
-
-    except ValueError as e:
-        return {"error": str(e)}
-    except Exception as e:
-        return {"error": f"Location lookup failed: {str(e)}"}
-
-    try:
-        token = get_access_token()
-        url = "https://test.api.amadeus.com/v2/shopping/flight-offers"
-        headers = {"Authorization": f"Bearer {token}"}
 
         params = {
-            "originLocationCode": origin_code,
-            "destinationLocationCode": destination_code,
-            "departureDate": depart_date,
-            "returnDate": return_date,
-            "adults": adults,
-            "currencyCode": "USD",
-            "max": 6
+            "access_key": AVIATIONSTACK_API_KEY,
+            "dep_iata": origin_iata,
+            "arr_iata": destination_iata,
+            "flight_date": depart_date,
         }
 
-        # Add max_price only if provided and valid
-        if max_price is not None and max_price > 0:
-            params["maxPrice"] = int(max_price)
+        response = requests.get(f"{BASE_URL}/flights", params=params)
 
-        response = requests.get(url, headers=headers, params=params)
+        if response.status_code != 200:
+            return {"error": f"Aviationstack API error: {response.text}"}
 
-        # Handle different HTTP errors
-        if response.status_code == 400:
-            error_data = response.json() if response.content else {}
-            error_msg = error_data.get('errors', [{}])[0].get('detail', 'Bad request - check your search parameters')
-            return {"error": f"Search parameters invalid: {error_msg}"}
-        elif response.status_code == 401:
-            return {"error": "Authentication failed - check API credentials"}
-        elif response.status_code == 429:
-            return {"error": "Rate limit exceeded - please try again later"}
+        data = response.json().get("data", [])
 
-        response.raise_for_status()
-        result = response.json()
-
-        # Check if API returned any data
-        if not result.get("data"):
+        if not data:
             return {
                 "data": [],
                 "message": "No flights found for the specified criteria",
                 "search_params": {
-                    "origin": f"{origin_name} ({origin_code})",
-                    "destination": f"{destination_name} ({destination_code})",
-                    "depart_date": depart_date,
-                    "return_date": return_date,
-                    "adults": adults,
-                    "max_price": max_price
+                    "origin": origin_iata,
+                    "destination": destination_iata,
+                    "depart_date": depart_date
                 }
             }
 
-        return result
+        return data
 
-    except requests.exceptions.RequestException as e:
-        return {"error": f"API request failed: {str(e)}"}
     except Exception as e:
         return {"error": f"Unexpected error: {str(e)}"}
 
 
-# Example usage
+# 🔎 Example usage
 if __name__ == "__main__":
     flights = search_flights(
-        "New York",
-        "Paris",
-        "2025-09-15",
-        "2025-09-22",
-        adults=1,
-        max_price=1500  # optional
+        origin_iata="LHR",     # London Heathrow
+        destination_iata="DEL",  # Delhi Indira Gandhi
+        depart_date="2025-09-09"
     )
 
     if "error" in flights:
-        print(f"Error: {flights['error']}")
+        print(f"❌ Error: {flights['error']}")
     else:
-        print(f"Found {len(flights.get('data', []))} flights")
-        for i, flight in enumerate(flights.get('data', [])[:3]):  # Show first 3
-            price = flight.get('price', {}).get('total', 'N/A')
-            currency = flight.get('price', {}).get('currency', 'USD')
-            print(f"Flight {i + 1}: {price} {currency}")
+        print(f"✅ Found {len(flights)} flights")
+        for i, flight in enumerate(flights[:3]):  # Show first 3 flights
+            flight_number = flight.get("flight", {}).get("iata", "N/A")
+            airline = flight.get("airline", {}).get("name", "Unknown Airline")
+            status = flight.get("flight_status", "unknown")
+            dep_time = flight.get("departure", {}).get("scheduled", "N/A")
+            print(f"✈️ Flight {flight_number} ({airline}) - Departs: {dep_time} - Status: {status}")
