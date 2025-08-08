@@ -180,4 +180,168 @@ async def plan_trip_streaming(request: StreamingTravelRequest):
 
 # Streaming logic with interrupt support
 async def stream_travel_planning(user_input: str, request_id: str) -> Any:
-    thread_id = str(uuid.uuid
+    thread_id = str(uuid.uuid4())
+
+    initial_state = {
+        'thread_id': thread_id,
+        "user_input": user_input,
+        "messages": [],
+        "travel_details": {},
+        "preferred_airlines": [],
+        "hotel_amenities": [],
+        "budget_level": "medium",
+        "flight_results": "",
+        "hotel_results": "",
+        "activity_results": "",
+        "final_plan": "",
+        "errors": []
+    }
+
+    config = {"configurable": {"thread_id": thread_id}}
+    
+    final_plan = "No travel plan could be generated."
+    
+    try:
+        async for event in travel_agent_graph.astream(initial_state, config=config, stream_mode="updates"):
+            for node_name, update in event.items():
+                logger.info(f"Request {request_id}: {node_name} update")
+
+                if update.get("interrupt"):
+                    active_requests[request_id]["status"] = "waiting_for_user"
+                    # Note: We can't pickle the state directly for storage, so this is a simplified example
+                    active_requests[request_id]["interrupted_state"] = update["current_state"]
+                    active_requests[request_id]["interrupt_question"] = update.get("question", "Need more details")
+                    return {
+                        "interrupt": True,
+                        "question": update.get("question")
+                    }
+
+                if node_name == "create_final_plan" and "final_plan" in update:
+                    final_plan = update["final_plan"]
+                    # If final plan is generated, break the stream and return
+                    return final_plan
+
+    except Exception as e:
+        logger.error(f"Streaming failed for {request_id}, fallback triggered: {e}")
+        # ⚠️ The fix: Correctly unpack the tuple from the fallback function
+        final_plan_str, errors = await run_travel_agent_simple(user_input)
+        return final_plan_str
+    
+    return final_plan
+
+
+# Resume logic after interrupt
+@app.post("/resume-trip")
+async def resume_trip(request: ResumeTripRequest):
+    request_id = request.request_id
+
+    if request_id not in active_requests:
+        raise HTTPException(status_code=404, detail="Request not found")
+
+    state = active_requests[request_id].get("interrupted_state")
+    if not state:
+        raise HTTPException(status_code=400, detail="No interrupted state available")
+
+    state["user_input"] = request.user_input
+    config = {"configurable": {"thread_id": state["thread_id"]}}
+
+    final_plan_str = None
+    
+    try:
+        async for event in travel_agent_graph.astream(state, config=config, stream_mode="updates"):
+            for node_name, update in event.items():
+                logger.info(f"Resuming Request {request_id}: {node_name} update")
+
+                if update.get("interrupt"):
+                    active_requests[request_id]["status"] = "waiting_for_user"
+                    active_requests[request_id]["interrupted_state"] = update["current_state"]
+                    active_requests[request_id]["interrupt_question"] = update.get("question", "Need more details")
+                    return {
+                        "status": "waiting_for_user",
+                        "question": update.get("question"),
+                        "request_id": request_id
+                    }
+
+                if node_name == "create_final_plan" and "final_plan" in update:
+                    final_plan_str = update["final_plan"]
+                    active_requests.pop(request_id, None)
+                    return {
+                        "status": "complete",
+                        "request_id": request_id,
+                        "final_plan": final_plan_str
+                    }
+
+    except Exception as e:
+        logger.error(f"Error resuming travel request {request_id}: {str(e)}")
+        # ⚠️ The fix: Correctly unpack the tuple from the fallback function
+        final_plan_str, errors = await run_travel_agent_simple(request.user_input)
+        return {
+            "status": "error",
+            "message": str(e),
+            "final_plan": final_plan_str,
+            "request_id": request_id
+        }
+
+    return {
+        "status": "incomplete",
+        "request_id": request_id
+    }
+
+# Status endpoints
+@app.get("/request-status/{request_id}")
+async def get_request_status(request_id: str):
+    if request_id not in active_requests:
+        raise HTTPException(status_code=404, detail="Request not found")
+
+    request_info = active_requests[request_id]
+    processing_time = (datetime.utcnow() - request_info["start_time"]).total_seconds()
+
+    return {
+        "request_id": request_id,
+        "status": request_info["status"],
+        "user_input": request_info["user_input"],
+        "processing_time": processing_time,
+        "start_time": request_info["start_time"].isoformat()
+    }
+
+@app.get("/active-requests")
+async def get_active_requests():
+    current_time = datetime.utcnow()
+    requests_info = []
+
+    for req_id, req_info in active_requests.items():
+        processing_time = (current_time - req_info["start_time"]).total_seconds()
+        requests_info.append({
+            "request_id": req_id,
+            "status": req_info["status"],
+            "processing_time": processing_time,
+            "user_input": req_info["user_input"][:100] + "..." if len(req_info["user_input"]) > 100 else req_info["user_input"]
+        })
+
+    return {
+        "total_active": len(active_requests),
+        "requests": requests_info
+    }
+
+@app.post("/cancel-request/{request_id}")
+async def cancel_request(request_id: str):
+    if request_id not in active_requests:
+        raise HTTPException(status_code=404, detail="Request not found")
+
+    request_info = active_requests.pop(request_id)
+    processing_time = (datetime.utcnow() - request_info["start_time"]).total_seconds()
+
+    return {
+        "message": "Request cancelled successfully",
+        "request_id": request_id,
+        "processing_time": processing_time
+    }
+
+@app.on_event("startup")
+async def startup_event():
+    logger.info("Goplan Travel Agent API starting up...")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    logger.info("Goplan Travel Agent API shutting down...")
+    active_requests.clear()
