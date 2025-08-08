@@ -1,14 +1,7 @@
-Based on the error message, the issue is that your LangGraph is attempting to update the `errors` key in the state from multiple parallel nodes (`get_flight_recommendations`, `get_hotel_recommendations`, etc.) without a merger function. LangGraph doesn't know how to combine the results from these concurrent updates, which causes the `INVALID_CONCURRENT_GRAPH_UPDATE` error.
 
-I've fixed your `agent_graph.py` code by introducing a custom merger function and using the `Annotated` type to tell LangGraph how to handle these parallel updates.
-
-Here is the corrected and complete `agent_graph.py` code.
-
------
 
 ### Fixed `agent_graph.py`
 
-```python
 import uuid
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph, START, END
@@ -642,4 +635,4 @@ async def main():
 # Example usage
 if __name__ == "__main__":
     asyncio.run(main())
-```
+
