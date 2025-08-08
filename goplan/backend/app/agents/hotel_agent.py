@@ -76,6 +76,7 @@ hotel_agent=Agent(
     deps_type=HotelDeps,
     retries=2
 )
+
 @hotel_agent.tool
 async def search_hotels(
     ctx: RunContext[HotelDeps],
@@ -85,23 +86,18 @@ async def search_hotels(
     max_price: Optional[float] = None
 ) -> List[dict]:
     """
-    Search and filter hotels based on user preferences and Amadeus API data.
+    Search and filter hotels based on user preferences using HotelLook API.
     """
-
-    # Get hotel data (combined list + search)
     hotel_data = search_hotels_combined(city, check_in, check_out, max_price)
 
-    # Extract the list of hotels from the API response
     if isinstance(hotel_data, dict):
         hotel_options = hotel_data.get("data", [])
     else:
-        hotel_options = hotel_data  # In case it's already a list
+        hotel_options = hotel_data
 
-    # Ensure we have a list of hotel dicts
     if not isinstance(hotel_options, list):
         return []
 
-    # Filter by max price if provided
     if max_price is not None:
         try:
             filtered_hotels = [
@@ -116,17 +112,18 @@ async def search_hotels(
     preferred_amenities = ctx.deps.hotel_amenities or []
     budget_level = ctx.deps.budget_level
 
-    # Sort hotels by preference match if amenities are specified
-    if preferred_amenities:
-        for hotel in filtered_hotels:
-            amenities = hotel.get("amenities", []) or []
-            matching_amenities = [a for a in amenities if a in preferred_amenities]
-            hotel["matching_amenities"] = matching_amenities
-            hotel["preference_score"] = len(matching_amenities)
+    # Since HotelLook has no amenities data, skip preference scoring
+    for hotel in filtered_hotels:
+        hotel["matching_amenities"] = []
+        hotel["preference_score"] = 0
+        hotel["rating"] = hotel.get("stars", None)  # Map stars -> rating
+        hotel["booking_link"] = ""  # Placeholder — optional to add later
 
-        filtered_hotels.sort(key=lambda x: x.get("preference_score", 0), reverse=True)
+        hotel["address"] = ", ".join(filter(None, [
+            hotel.get("location"),
+            hotel.get("country")
+        ]))
 
-    # Apply budget level sorting if specified
     if budget_level:
         if budget_level.lower() == "budget":
             filtered_hotels.sort(
@@ -137,6 +134,6 @@ async def search_hotels(
                 key=lambda x: float(x.get("price_per_night", 0)),
                 reverse=True
             )
-        # mid-range is left in current order
 
     return filtered_hotels
+
