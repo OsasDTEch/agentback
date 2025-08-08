@@ -8,6 +8,7 @@ import json
 import uuid
 from datetime import datetime
 import logging
+import logfire
 
 # Import your travel agent components
 from goplan.backend.app.agent_graph import (
@@ -66,8 +67,10 @@ class ResumeTripRequest(BaseModel):
 active_requests: Dict[str, Dict[str, Any]] = {}
 
 # Health
+@logfire.trace
 @app.get("/")
 async def root():
+    logfire.info("Health check hit", extra={"route": "/", "status": "OK"})
     return {
         "message": "Goplan Travel Agent API",
         "status": "active",
@@ -312,3 +315,4 @@ async def startup_event():
 async def shutdown_event():
     logger.info("Goplan Travel Agent API shutting down...")
     active_requests.clear()
+
