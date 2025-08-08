@@ -9,7 +9,9 @@ import uuid
 from datetime import datetime
 import logging
 import logfire
+from logging_config import setup_logging
 
+setup_logging()
 # Import your travel agent components
 from goplan.backend.app.agent_graph import (
     travel_agent_graph,
@@ -315,4 +317,5 @@ async def startup_event():
 async def shutdown_event():
     logger.info("Goplan Travel Agent API shutting down...")
     active_requests.clear()
+
 
