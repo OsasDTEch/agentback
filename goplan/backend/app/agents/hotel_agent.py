@@ -10,9 +10,9 @@ from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
 
 # Import the fixed hotel search function
-# from goplan.backend.app.api.hotellist_api import get_hotel_list_hotellook
+#  import get_hotel_list_hotellook
 # For now, using the mock version for testing
-from hotelsearch import get_hotel_list_mock as get_hotel_list_hotellook
+from goplan.backend.app.api.hotellist_api import get_hotel_list_mock as get_hotel_list_hotellook
 
 provider = GoogleProvider(api_key=os.getenv('GOOGLE_API_KEY'))
 
@@ -164,3 +164,4 @@ async def search_hotels(
             )
 
     return filtered_hotels[:10]  # Return top 10 results
+
