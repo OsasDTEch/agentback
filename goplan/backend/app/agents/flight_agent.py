@@ -12,16 +12,12 @@ model = GoogleModel('gemini-2.5-flash', provider=provider)
 
 # Static city → IATA map (expand as needed)
 city_to_iata = {
-    "london": "LON",
-    "new york": "NYC",
-    "paris": "PAR",
-    "dubai": "DXB",
-    "tokyo": "TYO",
-    "los angeles": "LAX",
-    "berlin": "BER",
-    "madrid": "MAD",
-    "rome": "ROM",
-    "sydney": "SYD"
+  "london": "LON", "new york": "NYC", "los angeles": "LAX", "paris": "PAR", "tokyo": "TYO",
+    "berlin": "BER", "chicago": "CHI", "madrid": "MAD", "sydney": "SYD", "dubai": "DXB",
+    "rome": "ROM", "toronto": "YTO", "moscow": "MOW", "amsterdam": "AMS", "beijing": "BJS",
+    "delhi": "DEL", "bangkok": "BKK", "singapore": "SIN", "hong kong": "HKG", "seoul": "SEL",
+    "boston": "BOS", "miami": "MIA", "atlanta": "ATL", "vienna": "VIE", "zurich": "ZRH",
+    "lisbon": "LIS", "prague": "PRG", "warsaw": "WAW", "cairo": "CAI", "lagos": "LOS",
 }
 
 AVIATIONSTACK_API_KEY = os.getenv("AVIATIONSTACK_API_KEY")  # Set this in env
@@ -126,3 +122,4 @@ async def search_flight(
             "error": f"Flight search failed: {str(e)}",
             "data": []
         }
+
