@@ -326,14 +326,15 @@ async def shutdown_event():
 
 
 
-if __name__ == "__main__":
-    import uvicorn
+# if __name__ == "__main__":
+#     import uvicorn
 
-    # Run the server
-    uvicorn.run(
-        "main:app",  # Replace with your actual module name
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
-        log_level="info"
-    )
+#     # Run the server
+#     uvicorn.run(
+#         "main:app",  # Replace with your actual module name
+#         host="0.0.0.0",
+#         port=8000,
+#         reload=True,
+#         log_level="info"
+
+#     )
