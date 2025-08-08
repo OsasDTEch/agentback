@@ -6,3 +6,4 @@ langgraph
 logfire
 streamlit
 parsedatetime
+pydantic_ai
