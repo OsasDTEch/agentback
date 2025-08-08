@@ -1,11 +1,12 @@
+# ============= FLIGHTSEARCHAPI.PY (FIXED) =============
 import requests
+import os  # Added missing import
 from datetime import datetime, timezone
-
 
 # ✅ Static mapping: 30 popular cities
 CITY_TO_IATA = {
     "new york": "JFK",
-    "london": "LON",
+    "london": "LON", 
     "paris": "CDG",
     "dubai": "DXB",
     "tokyo": "HND",
@@ -36,14 +37,12 @@ CITY_TO_IATA = {
     "helsinki": "HEL"
 }
 
-
 def get_city_code(keyword):
     """Return IATA code from static city lookup"""
     keyword_lower = keyword.lower()
     if keyword_lower in CITY_TO_IATA:
         return CITY_TO_IATA[keyword_lower]
     raise ValueError(f"City '{keyword}' not found in supported list")
-
 
 def validate_date(date_string):
     """Ensure date is in YYYY-MM-DD and in the future"""
@@ -56,13 +55,17 @@ def validate_date(date_string):
     except ValueError as e:
         raise ValueError(f"Invalid date format: {date_string}. Use YYYY-MM-DD. {str(e)}")
 
-
 def search_flights(origin_name, destination_name, depart_date, return_date=None,
                    adults=1, max_price=None):
     """
     Search flights using Aviationstack API
     - Return date and max_price are ignored (Aviationstack doesn't support them)
     """
+    
+    # Check if API key is available
+    api_key = os.getenv('AVIATIONSTACK_API_KEY')  # Fixed environment variable name
+    if not api_key:
+        return {"error": "AVIATIONSTACK_API_KEY environment variable not set"}
 
     try:
         # Validate input dates
@@ -77,25 +80,27 @@ def search_flights(origin_name, destination_name, depart_date, return_date=None,
     except ValueError as e:
         return {"error": str(e)}
 
-    # Aviationstack doesn't support real-time search for future flights,
-    # only live flights or historical. So we simulate the "search" by querying live flights
-    # between the IATA codes (best we can do with free version)
-
     try:
-        url = "http://api.aviationstack.com/v1/flights"
+        # Use HTTPS instead of HTTP
+        url = "https://api.aviationstack.com/v1/flights"
         params = {
-            "access_key": os.getenv('AVIATION_APIKEY),  # <-- Replace this
+            "access_key": api_key,  # Fixed variable name
             "dep_iata": origin_code,
             "arr_iata": destination_code,
             "limit": 6
         }
 
-        response = requests.get(url, params=params)
+        response = requests.get(url, params=params, timeout=30)  # Added timeout
 
         if response.status_code != 200:
             return {"error": f"API error: {response.status_code} - {response.text}"}
 
         result = response.json()
+        
+        # Check for API errors in response
+        if "error" in result:
+            return {"error": f"API Error: {result['error']}"}
+            
         flights = result.get("data", [])
 
         if not flights:
@@ -110,7 +115,6 @@ def search_flights(origin_name, destination_name, depart_date, return_date=None,
                 }
             }
 
-        # Optionally enrich static airline names, etc.
         return {
             "data": flights,
             "search_params": {
@@ -121,17 +125,18 @@ def search_flights(origin_name, destination_name, depart_date, return_date=None,
             }
         }
 
+    except requests.exceptions.Timeout:
+        return {"error": "Request timeout - API took too long to respond"}
     except requests.exceptions.RequestException as e:
         return {"error": f"Request failed: {str(e)}"}
     except Exception as e:
         return {"error": f"Unexpected error: {str(e)}"}
 
-
 # ✅ Example usage
 if __name__ == "__main__":
     flights = search_flights(
         "London",
-        "New York",
+        "New York", 
         "2025-09-15"
     )
 
@@ -145,3 +150,4 @@ if __name__ == "__main__":
             dep = flight.get("departure", {}).get("airport", "Unknown")
             arr = flight.get("arrival", {}).get("airport", "Unknown")
             print(f"✈️ {airline} {flight_number} from {dep} → {arr}")
+
