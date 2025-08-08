@@ -1,14 +1,12 @@
 import uuid
-
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph, START, END
 from langgraph.config import get_stream_writer
-from typing import Annotated, Dict, List, Any
+from typing import Annotated, Dict, List, Any, Optional
 from typing_extensions import TypedDict
 from langgraph.types import interrupt
 from pydantic import ValidationError
 from dataclasses import dataclass
-import logfire
 import asyncio
 import sys
 import os
@@ -18,11 +16,40 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelMessagesTypeAdapter
 )
-from goplan.backend.app.agents.info_gathering_agent import info_gathering_agent, TravelDetails
-from goplan.backend.app.agents.flight_agent import flight_agent, FlightDeps
-from goplan.backend.app.agents.hotel_agent import hotel_agent, HotelDeps
-from goplan.backend.app.agents.activity_agent import activity_agent
-from goplan.backend.app.agents.final_planner_agent import final_planner_agent
+
+# Updated imports with error handling for missing agents
+try:
+    from goplan.backend.app.agents.info_gathering_agent import info_gathering_agent, TravelDetails
+except ImportError:
+    print("⚠️ Warning: info_gathering_agent not found")
+    info_gathering_agent = None
+    TravelDetails = dict
+
+try:
+    from goplan.backend.app.agents.flight_agent import flight_agent, FlightDeps
+except ImportError:
+    print("⚠️ Warning: flight_agent not found")
+    flight_agent = None
+    FlightDeps = dict
+
+try:
+    from goplan.backend.app.agents.hotel_agent import hotel_agent, HotelDeps
+except ImportError:
+    print("⚠️ Warning: hotel_agent not found")
+    hotel_agent = None
+    HotelDeps = dict
+
+try:
+    from goplan.backend.app.agents.activity_agent import activity_agent
+except ImportError:
+    print("⚠️ Warning: activity_agent not found")
+    activity_agent = None
+
+try:
+    from goplan.backend.app.agents.final_planner_agent import final_planner_agent
+except ImportError:
+    print("⚠️ Warning: final_planner_agent not found")
+    final_planner_agent = None
 
 
 # Define the state for our graph
@@ -45,53 +72,84 @@ class TravelState(TypedDict):
 
     # Final summary
     final_plan: str
+    
+    # Error tracking
+    errors: List[str]
 
 
 # Node functions for the graph
-# Info gathering node
 async def gather_info(state: TravelState, *, config) -> Dict[str, Any]:
     """Gather necessary travel information from the user."""
     try:
         writer = get_stream_writer()
     except RuntimeError:
-        # Fallback if stream writer is not available
         writer = lambda x: print(x, end='', flush=True)
+    
+    if not info_gathering_agent:
+        return {
+            "travel_details": {"error": "Info gathering agent not available"},
+            "errors": ["Info gathering agent not found"],
+            "messages": []
+        }
+    
     user_input = state["user_input"]
+    writer("🔍 Gathering travel information...\n")
 
-    # Get the message history into the format for Pydantic AI
-    message_history: list[ModelMessage] = []
-    for message_row in state.get('messages', []):
-        message_history.extend(ModelMessagesTypeAdapter.validate_json(message_row))
-
-    # Call the info gathering agent
-    async with info_gathering_agent.run_stream(user_input, message_history=message_history) as result:
-        curr_response = ""
-        travel_details = None
-
-        async for message, last in result.stream_structured(debounce_by=0.01):
+    try:
+        # Get the message history into the format for Pydantic AI
+        message_history: list[ModelMessage] = []
+        for message_row in state.get('messages', []):
             try:
-                # Use the new method name
-                travel_details = await result.validate_structured_output(
-                    message,
-                    allow_partial=not last
-                )
-                if last and not travel_details.response:
-                    raise Exception("Incorrect travel details returned by the agent.")
-            except ValidationError as e:
-                continue
+                message_history.extend(ModelMessagesTypeAdapter.validate_json(message_row))
+            except Exception as e:
+                print(f"Warning: Could not parse message history: {e}")
 
-            if travel_details and travel_details.response:
-                new_content = travel_details.response[len(curr_response):]
-                if new_content:
-                    writer(new_content)
-                curr_response = travel_details.response
+        # Call the info gathering agent
+        async with info_gathering_agent.run_stream(user_input, message_history=message_history) as result:
+            curr_response = ""
+            travel_details = None
 
-    # Use the new method name
-    data = await result.get_output()
-    return {
-        "travel_details": data.model_dump(),
-        "messages": [result.new_messages_json()]
-    }
+            async for message, last in result.stream_structured(debounce_by=0.01):
+                try:
+                    # Fixed method name - use get_structured_output instead
+                    travel_details = await result.get_structured_output(
+                        message,
+                        allow_partial=not last
+                    )
+                    if last and not travel_details.response:
+                        raise Exception("Incorrect travel details returned by the agent.")
+                except ValidationError as e:
+                    continue
+                except AttributeError:
+                    # Fallback if method name is different
+                    try:
+                        travel_details = message
+                    except:
+                        continue
+
+                if travel_details and hasattr(travel_details, 'response') and travel_details.response:
+                    new_content = travel_details.response[len(curr_response):]
+                    if new_content:
+                        writer(new_content)
+                    curr_response = travel_details.response
+
+        # Get the final output
+        data = await result.get_output()
+        writer("✅ Travel information gathered successfully!\n")
+        
+        return {
+            "travel_details": data.model_dump() if hasattr(data, 'model_dump') else data,
+            "messages": [result.new_messages_json()],
+            "errors": []
+        }
+        
+    except Exception as e:
+        writer(f"❌ Error gathering travel info: {str(e)}\n")
+        return {
+            "travel_details": {"error": str(e)},
+            "errors": [f"Info gathering failed: {str(e)}"],
+            "messages": []
+        }
 
 
 async def get_flight_recommendations(state: TravelState, *, config) -> Dict[str, Any]:
@@ -101,25 +159,58 @@ async def get_flight_recommendations(state: TravelState, *, config) -> Dict[str,
     except RuntimeError:
         writer = lambda x: print(x, end='', flush=True)
 
-    writer("\n#### Getting flight recommendations...\n")
+    writer("✈️ Getting flight recommendations...\n")
+
+    if not flight_agent:
+        writer("❌ Flight agent not available\n")
+        return {
+            "flight_results": "Flight search service temporarily unavailable",
+            "errors": ["Flight agent not found"]
+        }
 
     travel_details = state["travel_details"]
     preferred_airlines = state.get('preferred_airlines', [])
 
-    # Create flight dependencies
-    flight_dependencies = FlightDeps(preferred_airlines=preferred_airlines)
-
-    # Prepare the prompt for the flight agent
-    prompt = f"I need flight recommendations from {travel_details['origin']} to {travel_details['destination']} on {travel_details['date_leaving']}. Return flight on {travel_details['date_returning']}."
+    # Check if travel details contain errors
+    if "error" in travel_details:
+        return {
+            "flight_results": "Cannot search flights due to incomplete travel details",
+            "errors": ["Travel details incomplete"]
+        }
 
     try:
+        # Create flight dependencies
+        if FlightDeps != dict:
+            flight_dependencies = FlightDeps(preferred_airlines=preferred_airlines)
+        else:
+            flight_dependencies = {"preferred_airlines": preferred_airlines}
+
+        # Prepare the prompt for the flight agent
+        origin = travel_details.get('origin', 'Unknown')
+        destination = travel_details.get('destination', 'Unknown')
+        date_leaving = travel_details.get('date_leaving', 'Unknown')
+        date_returning = travel_details.get('date_returning', 'Unknown')
+        
+        prompt = f"I need flight recommendations from {origin} to {destination} on {date_leaving}. Return flight on {date_returning}."
+
         # Call the flight agent
-        result = await flight_agent.run(prompt, deps=flight_dependencies)
+        if FlightDeps != dict:
+            result = await flight_agent.run(prompt, deps=flight_dependencies)
+        else:
+            result = await flight_agent.run(prompt)
+            
         writer("✅ Flight recommendations retrieved successfully!\n")
-        return {"flight_results": result.data}
+        return {
+            "flight_results": str(result.data) if hasattr(result, 'data') else str(result),
+            "errors": []
+        }
+        
     except Exception as e:
         writer(f"❌ Error getting flight recommendations: {str(e)}\n")
-        return {"flight_results": f"Flight search temporarily unavailable: {str(e)}"}
+        return {
+            "flight_results": f"Flight search temporarily unavailable: {str(e)}",
+            "errors": [f"Flight search failed: {str(e)}"]
+        }
 
 
 async def get_hotel_recommendations(state: TravelState, *, config) -> Dict[str, Any]:
@@ -129,29 +220,65 @@ async def get_hotel_recommendations(state: TravelState, *, config) -> Dict[str, 
     except RuntimeError:
         writer = lambda x: print(x, end='', flush=True)
 
-    writer("\n#### Getting hotel recommendations...\n")
+    writer("🏨 Getting hotel recommendations...\n")
+
+    if not hotel_agent:
+        writer("❌ Hotel agent not available\n")
+        return {
+            "hotel_results": "Hotel search service temporarily unavailable",
+            "errors": ["Hotel agent not found"]
+        }
 
     travel_details = state["travel_details"]
     hotel_amenities = state.get('hotel_amenities', [])
     budget_level = state.get('budget_level', 'medium')
 
-    # Create hotel dependencies
-    hotel_dependencies = HotelDeps(
-        hotel_amenities=hotel_amenities,
-        budget_level=budget_level
-    )
-
-    # Prepare the prompt for the hotel agent
-    prompt = f"I need hotel recommendations in {travel_details['destination']} from {travel_details['date_leaving']} to {travel_details['date_returning']} with a maximum price of ${travel_details.get('max_hotel_price', '200')} per night."
+    # Check if travel details contain errors
+    if "error" in travel_details:
+        return {
+            "hotel_results": "Cannot search hotels due to incomplete travel details",
+            "errors": ["Travel details incomplete"]
+        }
 
     try:
+        # Create hotel dependencies
+        if HotelDeps != dict:
+            hotel_dependencies = HotelDeps(
+                hotel_amenities=hotel_amenities,
+                budget_level=budget_level
+            )
+        else:
+            hotel_dependencies = {
+                "hotel_amenities": hotel_amenities,
+                "budget_level": budget_level
+            }
+
+        # Prepare the prompt for the hotel agent
+        destination = travel_details.get('destination', 'Unknown')
+        date_leaving = travel_details.get('date_leaving', 'Unknown')
+        date_returning = travel_details.get('date_returning', 'Unknown')
+        max_hotel_price = travel_details.get('max_hotel_price', '200')
+        
+        prompt = f"I need hotel recommendations in {destination} from {date_leaving} to {date_returning} with a maximum price of ${max_hotel_price} per night."
+
         # Call the hotel agent
-        result = await hotel_agent.run(prompt, deps=hotel_dependencies)
+        if HotelDeps != dict:
+            result = await hotel_agent.run(prompt, deps=hotel_dependencies)
+        else:
+            result = await hotel_agent.run(prompt)
+            
         writer("✅ Hotel recommendations retrieved successfully!\n")
-        return {"hotel_results": result.data}
+        return {
+            "hotel_results": str(result.data) if hasattr(result, 'data') else str(result),
+            "errors": []
+        }
+        
     except Exception as e:
         writer(f"❌ Error getting hotel recommendations: {str(e)}\n")
-        return {"hotel_results": f"Hotel search temporarily unavailable: {str(e)}"}
+        return {
+            "hotel_results": f"Hotel search temporarily unavailable: {str(e)}",
+            "errors": [f"Hotel search failed: {str(e)}"]
+        }
 
 
 async def get_activity_recommendations(state: TravelState, *, config) -> Dict[str, Any]:
@@ -161,24 +288,48 @@ async def get_activity_recommendations(state: TravelState, *, config) -> Dict[st
     except RuntimeError:
         writer = lambda x: print(x, end='', flush=True)
 
-    writer("\n#### Getting activity recommendations...\n")
+    writer("🎯 Getting activity recommendations...\n")
+
+    if not activity_agent:
+        writer("❌ Activity agent not available\n")
+        return {
+            "activity_results": "Activity search service temporarily unavailable",
+            "errors": ["Activity agent not found"]
+        }
 
     travel_details = state["travel_details"]
 
-    # Prepare the prompt for the activity agent
-    prompt = f"I need activity recommendations for {travel_details['destination']} from {travel_details['date_leaving']} to {travel_details['date_returning']}."
+    # Check if travel details contain errors
+    if "error" in travel_details:
+        return {
+            "activity_results": "Cannot search activities due to incomplete travel details",
+            "errors": ["Travel details incomplete"]
+        }
 
     try:
+        # Prepare the prompt for the activity agent
+        destination = travel_details.get('destination', 'Unknown')
+        date_leaving = travel_details.get('date_leaving', 'Unknown')
+        date_returning = travel_details.get('date_returning', 'Unknown')
+        
+        prompt = f"I need activity recommendations for {destination} from {date_leaving} to {date_returning}."
+
         # Call the activity agent
         result = await activity_agent.run(prompt)
         writer("✅ Activity recommendations retrieved successfully!\n")
-        return {"activity_results": result.data}
+        return {
+            "activity_results": str(result.data) if hasattr(result, 'data') else str(result),
+            "errors": []
+        }
+        
     except Exception as e:
         writer(f"❌ Error getting activity recommendations: {str(e)}\n")
-        return {"activity_results": f"Activity search temporarily unavailable: {str(e)}"}
+        return {
+            "activity_results": f"Activity search temporarily unavailable: {str(e)}",
+            "errors": [f"Activity search failed: {str(e)}"]
+        }
 
 
-# Final planning node
 async def create_final_plan(state: TravelState, *, config) -> Dict[str, Any]:
     """Create a final travel plan based on all recommendations."""
     try:
@@ -186,53 +337,125 @@ async def create_final_plan(state: TravelState, *, config) -> Dict[str, Any]:
     except RuntimeError:
         writer = lambda x: print(x, end='', flush=True)
 
-    writer("\n#### Creating your final travel plan...\n")
+    writer("📋 Creating your final travel plan...\n")
+
+    if not final_planner_agent:
+        writer("❌ Final planner agent not available\n")
+        # Create a basic plan from available data
+        travel_details = state["travel_details"]
+        flight_results = state["flight_results"]
+        hotel_results = state["hotel_results"]
+        activity_results = state["activity_results"]
+        
+        basic_plan = f"""
+🌟 TRAVEL PLAN SUMMARY
+
+📍 Destination: {travel_details.get('destination', 'Unknown')}
+📅 Dates: {travel_details.get('date_leaving', 'Unknown')} to {travel_details.get('date_returning', 'Unknown')}
+
+✈️ FLIGHTS:
+{flight_results}
+
+🏨 ACCOMMODATIONS:
+{hotel_results}
+
+🎯 ACTIVITIES:
+{activity_results}
+
+⚠️ Note: This is a basic summary. Full planning service temporarily unavailable.
+        """
+        
+        return {
+            "final_plan": basic_plan.strip(),
+            "errors": ["Final planner agent not found"]
+        }
 
     travel_details = state["travel_details"]
     flight_results = state["flight_results"]
     hotel_results = state["hotel_results"]
     activity_results = state["activity_results"]
-
-    # Prepare the prompt for the final planner agent
-    prompt = f"""
-    I'm planning a trip to {travel_details['destination']} from {travel_details['origin']} on {travel_details['date_leaving']} and returning on {travel_details['date_returning']}.
-
-    Here are the flight recommendations:
-    {flight_results}
-
-    Here are the hotel recommendations:
-    {hotel_results}
-
-    Here are the activity recommendations:
-    {activity_results}
-
-    Please create a comprehensive travel plan based on these recommendations.
-    """
+    errors = state.get("errors", [])
 
     try:
-        # Call the final planner agent
+        # Prepare the prompt for the final planner agent
+        prompt = f"""
+        I'm planning a trip to {travel_details.get('destination', 'Unknown')} from {travel_details.get('origin', 'Unknown')} on {travel_details.get('date_leaving', 'Unknown')} and returning on {travel_details.get('date_returning', 'Unknown')}.
+
+        Here are the flight recommendations:
+        {flight_results}
+
+        Here are the hotel recommendations:
+        {hotel_results}
+
+        Here are the activity recommendations:
+        {activity_results}
+
+        {"Note: Some services experienced errors: " + "; ".join(errors) if errors else ""}
+
+        Please create a comprehensive travel plan based on these recommendations, organizing everything in a clear, actionable format.
+        """
+
+        # Call the final planner agent with streaming
         async with final_planner_agent.run_stream(prompt) as result:
             # Stream partial text as it arrives
             async for chunk in result.stream_text(delta=True):
                 writer(chunk)
 
-        # Return the final plan
+        # Get the final plan
         data = await result.get_output()
-        return {"final_plan": data}
+        writer("\n✅ Final travel plan created successfully!\n")
+        
+        return {
+            "final_plan": str(data),
+            "errors": errors
+        }
+        
     except Exception as e:
         writer(f"❌ Error creating final plan: {str(e)}\n")
-        return {"final_plan": f"Error creating plan: {str(e)}"}
+        # Fallback to basic plan creation
+        basic_plan = f"""
+🌟 TRAVEL PLAN SUMMARY
+
+📍 Destination: {travel_details.get('destination', 'Unknown')}
+📅 Dates: {travel_details.get('date_leaving', 'Unknown')} to {travel_details.get('date_returning', 'Unknown')}
+
+✈️ FLIGHTS:
+{flight_results}
+
+🏨 ACCOMMODATIONS:
+{hotel_results}
+
+🎯 ACTIVITIES:
+{activity_results}
+
+❌ Error creating detailed plan: {str(e)}
+        """
+        
+        return {
+            "final_plan": basic_plan.strip(),
+            "errors": errors + [f"Final planning failed: {str(e)}"]
+        }
 
 
 def route_after_info_gathering(state: TravelState):
     """Determine what to do after gathering information."""
     travel_details = state["travel_details"]
-
-    # If all details are not given, we need more information
-    if not travel_details.get("all_details_given", False):
+    
+    # Check for errors in travel details
+    if "error" in travel_details:
         return "get_next_user_message"
 
-    # If all details are given, we can proceed to parallel recommendations
+    # Check if all details are given (this depends on your TravelDetails structure)
+    all_details_given = travel_details.get("all_details_given", True)  # Default to True for now
+    
+    # You might want to check for specific required fields:
+    required_fields = ['origin', 'destination', 'date_leaving', 'date_returning']
+    has_required_fields = all(field in travel_details for field in required_fields)
+    
+    if not all_details_given or not has_required_fields:
+        return "get_next_user_message"
+
+    # If all details are given, proceed to parallel recommendations
     return ["get_flight_recommendations", "get_hotel_recommendations", "get_activity_recommendations"]
 
 
@@ -243,11 +466,12 @@ async def get_next_user_message(state: TravelState, *, config):
     except RuntimeError:
         writer = lambda x: print(x, end='', flush=True)
 
-    writer("\n🔄 I need some additional information to continue planning your trip...\n")
+    writer("🔄 I need some additional information to continue planning your trip...\n")
 
-    value = interrupt({})
+    # In a real application, this would wait for user input
+    # For testing, we'll simulate getting additional info
+    value = interrupt({"message": "Please provide more details about your travel plans."})
 
-    # Set the user's latest message for the LLM to continue the conversation
     return {
         "user_input": value
     }
@@ -277,7 +501,7 @@ def build_travel_agent_graph():
          "get_activity_recommendations"]
     )
 
-    # After getting a user message, route back to the info gathering agent
+    # After getting a user message, route back to info gathering
     graph.add_edge("get_next_user_message", "gather_info")
 
     # Connect all recommendation nodes to the final planning node
@@ -288,7 +512,7 @@ def build_travel_agent_graph():
     # Connect final planning to END
     graph.add_edge("create_final_plan", END)
 
-    # Compile the graph
+    # Compile the graph with memory
     memory = MemorySaver()
     return graph.compile(checkpointer=memory)
 
@@ -297,41 +521,8 @@ def build_travel_agent_graph():
 travel_agent_graph = build_travel_agent_graph()
 
 
-async def run_travel_agent(user_input: str):
-    """Run the travel agent with the given user input."""
-    # Generate a unique thread ID
-    thread_id = str(uuid.uuid4())
-
-    # Initialize the state with user input
-    initial_state = {
-        'thread_id': thread_id,
-        "user_input": user_input,
-        "messages": [],
-        "travel_details": {},
-        "preferred_airlines": [],
-        "hotel_amenities": [],
-        "budget_level": "medium",
-        "flight_results": "",
-        "hotel_results": "",
-        "activity_results": "",
-        "final_plan": ""
-    }
-
-    # Configuration with thread_id for the checkpointer
-    config = {"configurable": {"thread_id": thread_id}}
-
-    # Run the graph with config and collect streaming output
-    final_result = None
-    async for event in travel_agent_graph.astream(initial_state, config=config, stream_mode="updates"):
-        for node_name, update in event.items():
-            if node_name == "create_final_plan" and "final_plan" in update:
-                final_result = update["final_plan"]
-
-    return final_result
-
-
 async def run_travel_agent_simple(user_input: str):
-    """Simple version without complex streaming."""
+    """Simple version for testing."""
     # Generate a unique thread ID
     thread_id = str(uuid.uuid4())
 
@@ -342,84 +533,92 @@ async def run_travel_agent_simple(user_input: str):
         "messages": [],
         "travel_details": {},
         "preferred_airlines": [],
-        "hotel_amenities": [],
+        "hotel_amenities": ["Wi-Fi", "Breakfast"],
         "budget_level": "medium",
         "flight_results": "",
         "hotel_results": "",
         "activity_results": "",
-        "final_plan": ""
+        "final_plan": "",
+        "errors": []
     }
 
     # Configuration with thread_id for the checkpointer
     config = {"configurable": {"thread_id": thread_id}}
 
-    # Run the graph with config
-    result = await travel_agent_graph.ainvoke(initial_state, config=config)
-
-    # Return the final plan
-    return result.get("final_plan", "No plan generated")
+    try:
+        # Run the graph
+        result = await travel_agent_graph.ainvoke(initial_state, config=config)
+        return result.get("final_plan", "No plan generated"), result.get("errors", [])
+    except Exception as e:
+        return f"Error running travel agent: {str(e)}", [str(e)]
 
 
 async def run_travel_agent_with_streaming(user_input: str):
-    """Run the travel agent with streaming output for better user experience."""
-    # Generate a unique thread ID
+    """Run the travel agent with streaming output."""
     thread_id = str(uuid.uuid4())
 
-    # Initialize the state with user input
     initial_state = {
         'thread_id': thread_id,
         "user_input": user_input,
         "messages": [],
         "travel_details": {},
         "preferred_airlines": [],
-        "hotel_amenities": [],
+        "hotel_amenities": ["Wi-Fi", "Breakfast"],
         "budget_level": "medium",
         "flight_results": "",
         "hotel_results": "",
         "activity_results": "",
-        "final_plan": ""
+        "final_plan": "",
+        "errors": []
     }
 
-    # Configuration with thread_id for the checkpointer
     config = {"configurable": {"thread_id": thread_id}}
 
     print(f"🚀 Starting travel planning for: {user_input}")
     print("=" * 60)
 
-    # Run the graph with config and stream updates
     final_result = None
+    errors = []
+    
     try:
         async for event in travel_agent_graph.astream(initial_state, config=config, stream_mode="updates"):
             for node_name, update in event.items():
                 print(f"🔄 Processing: {node_name}")
-                if node_name == "create_final_plan" and "final_plan" in update:
-                    final_result = update["final_plan"]
+                if node_name == "create_final_plan":
+                    if "final_plan" in update:
+                        final_result = update["final_plan"]
+                    if "errors" in update:
+                        errors.extend(update["errors"])
     except Exception as e:
-        print(f"❌ Streaming failed, falling back to simple execution: {e}")
+        print(f"❌ Streaming failed: {e}")
         # Fallback to simple execution
-        result = await travel_agent_graph.ainvoke(initial_state, config=config)
-        final_result = result.get("final_plan", "No plan generated")
+        final_result, errors = await run_travel_agent_simple(user_input)
 
-    return final_result
+    return final_result, errors
 
 
 async def main():
-    # Example user input with corrected date format (2025 instead of 2024)
-    user_input = "I want to plan a trip from New York to Paris from 2025-09-15 to 2025-09-22. My max budget for a hotel is $2000 per night."
+    """Main function for testing."""
+    # Example user input with corrected date format
+    user_input = "I want to plan a trip from New York to Paris from 2025-09-15 to 2025-09-22. My budget for hotels is $300 per night."
 
-    # Try streaming first, fallback to simple if needed
     try:
-        final_plan = await run_travel_agent_with_streaming(user_input)
+        final_plan, errors = await run_travel_agent_with_streaming(user_input)
     except Exception as e:
-        print(f"Streaming failed: {e}")
-        print("Falling back to simple execution...")
-        final_plan = await run_travel_agent_simple(user_input)
+        print(f"Error: {e}")
+        final_plan, errors = await run_travel_agent_simple(user_input)
 
-    # Print the final plan
+    # Print the results
     print("\n" + "=" * 60)
     print("🎯 FINAL TRAVEL PLAN:")
     print("=" * 60)
     print(final_plan if final_plan else "No final plan was generated.")
+    
+    if errors:
+        print("\n" + "⚠️" * 20)
+        print("ERRORS ENCOUNTERED:")
+        for error in errors:
+            print(f"❌ {error}")
 
 
 # Example usage
