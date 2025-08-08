@@ -1,6 +1,7 @@
 import requests
 from dotenv import load_dotenv
 from datetime import datetime, timezone
+import os
 load_dotenv()
 AVIATIONSTACK_API_KEY = os.getenv('AVIATION_APIKEY')
 BASE_URL = "http://api.aviationstack.com/v1"
@@ -79,3 +80,4 @@ if __name__ == "__main__":
             status = flight.get("flight_status", "unknown")
             dep_time = flight.get("departure", {}).get("scheduled", "N/A")
             print(f"✈️ Flight {flight_number} ({airline}) - Departs: {dep_time} - Status: {status}")
+
