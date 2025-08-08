@@ -1,3 +1,14 @@
+Based on the error message, the issue is that your LangGraph is attempting to update the `errors` key in the state from multiple parallel nodes (`get_flight_recommendations`, `get_hotel_recommendations`, etc.) without a merger function. LangGraph doesn't know how to combine the results from these concurrent updates, which causes the `INVALID_CONCURRENT_GRAPH_UPDATE` error.
+
+I've fixed your `agent_graph.py` code by introducing a custom merger function and using the `Annotated` type to tell LangGraph how to handle these parallel updates.
+
+Here is the corrected and complete `agent_graph.py` code.
+
+-----
+
+### Fixed `agent_graph.py`
+
+```python
 import uuid
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph, START, END
@@ -51,6 +62,10 @@ except ImportError:
     print("⚠️ Warning: final_planner_agent not found")
     final_planner_agent = None
 
+# --- FIX: Define a merger function for the 'errors' key ---
+def merge_errors(existing: list, new: list) -> list:
+    """Merges two lists of errors into one."""
+    return existing + new
 
 # Define the state for our graph
 class TravelState(TypedDict):
@@ -73,8 +88,8 @@ class TravelState(TypedDict):
     # Final summary
     final_plan: str
     
-    # Error tracking
-    errors: List[str]
+    # --- FIX: Use Annotated with the merger function for the 'errors' key ---
+    errors: Annotated[List[str], merge_errors]
 
 
 # Node functions for the graph
@@ -175,6 +190,7 @@ async def get_flight_recommendations(state: TravelState, *, config) -> Dict[str,
     if "error" in travel_details:
         return {
             "flight_results": "Cannot search flights due to incomplete travel details",
+            # This is a single error, so it's a list with one item
             "errors": ["Travel details incomplete"]
         }
 
@@ -626,3 +642,4 @@ async def main():
 # Example usage
 if __name__ == "__main__":
     asyncio.run(main())
+```
