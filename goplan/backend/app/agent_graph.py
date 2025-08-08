@@ -548,8 +548,10 @@ async def run_travel_agent_simple(user_input: str):
     try:
         # Run the graph
         result = await travel_agent_graph.ainvoke(initial_state, config=config)
+        # ⚠️ Corrected: Return the plan and errors as a tuple
         return result.get("final_plan", "No plan generated"), result.get("errors", [])
     except Exception as e:
+        # ⚠️ Corrected: Return the error message and errors as a tuple
         return f"Error running travel agent: {str(e)}", [str(e)]
 
 
