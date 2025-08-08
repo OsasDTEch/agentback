@@ -1,6 +1,6 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import Dict, List, Optional, Any
 import asyncio
@@ -38,14 +38,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-# Pydantic models for API
+# Models
 class TravelRequest(BaseModel):
-    user_input: str = Field(..., description="User's travel planning request")
-    preferred_airlines: Optional[List[str]] = Field(default=[], description="Preferred airline codes")
-    hotel_amenities: Optional[List[str]] = Field(default=[], description="Desired hotel amenities")
-    budget_level: Optional[str] = Field(default="medium", description="Budget level: low, medium, high")
-
+    user_input: str
+    preferred_airlines: Optional[List[str]] = Field(default=[])
+    hotel_amenities: Optional[List[str]] = Field(default=[])
+    budget_level: Optional[str] = Field(default="medium")
 
 class TravelResponse(BaseModel):
     success: bool
@@ -54,21 +52,22 @@ class TravelResponse(BaseModel):
     error_message: Optional[str] = None
     processing_time: Optional[float] = None
 
-
 class StreamingTravelRequest(BaseModel):
-    user_input: str = Field(..., description="User's travel planning request")
-    preferred_airlines: Optional[List[str]] = Field(default=[], description="Preferred airline codes")
-    hotel_amenities: Optional[List[str]] = Field(default=[], description="Desired hotel amenities")
-    budget_level: Optional[str] = Field(default="medium", description="Budget level: low, medium, high")
+    user_input: str
+    preferred_airlines: Optional[List[str]] = Field(default=[])
+    hotel_amenities: Optional[List[str]] = Field(default=[])
+    budget_level: Optional[str] = Field(default="medium")
 
+class ResumeTripRequest(BaseModel):
+    request_id: str
+    user_input: str
 
-# In-memory storage for tracking requests (use Redis/database in production)
+# In-memory store
 active_requests: Dict[str, Dict[str, Any]] = {}
 
-
+# Health
 @app.get("/")
 async def root():
-    """Health check endpoint."""
     return {
         "message": "Goplan Travel Agent API",
         "status": "active",
@@ -76,10 +75,8 @@ async def root():
         "timestamp": datetime.utcnow().isoformat()
     }
 
-
 @app.get("/health")
 async def health_check():
-    """Detailed health check."""
     return {
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
@@ -92,35 +89,23 @@ async def health_check():
         }
     }
 
-
+# Standard trip planning (no streaming)
 @app.post("/plan-trip", response_model=TravelResponse)
 async def plan_trip(request: TravelRequest):
-    """
-    Plan a trip based on user input. Returns complete plan when ready.
-    """
     request_id = str(uuid.uuid4())
     start_time = datetime.utcnow()
 
     try:
         logger.info(f"Processing travel request {request_id}: {request.user_input}")
-
-        # Store request info
         active_requests[request_id] = {
             "status": "processing",
             "start_time": start_time,
             "user_input": request.user_input
         }
 
-        # Run the travel agent
         final_plan = await run_travel_agent_simple(request.user_input)
-
-        # Calculate processing time
         processing_time = (datetime.utcnow() - start_time).total_seconds()
-
-        # Clean up request tracking
         active_requests.pop(request_id, None)
-
-        logger.info(f"Completed travel request {request_id} in {processing_time:.2f}s")
 
         return TravelResponse(
             success=True,
@@ -130,13 +115,8 @@ async def plan_trip(request: TravelRequest):
         )
 
     except Exception as e:
-        # Calculate processing time
         processing_time = (datetime.utcnow() - start_time).total_seconds()
-
-        # Clean up request tracking
         active_requests.pop(request_id, None)
-
-        logger.error(f"Error processing travel request {request_id}: {str(e)}")
 
         return TravelResponse(
             success=False,
@@ -145,36 +125,29 @@ async def plan_trip(request: TravelRequest):
             processing_time=processing_time
         )
 
-
+# Streaming planner with interrupt support
 @app.post("/plan-trip-streaming")
 async def plan_trip_streaming(request: StreamingTravelRequest):
-    """
-    Plan a trip with streaming response. Returns real-time updates as the plan is being created.
-    """
     request_id = str(uuid.uuid4())
 
     async def generate_streaming_response():
-        """Generator function for streaming responses."""
         try:
             logger.info(f"Starting streaming travel request {request_id}: {request.user_input}")
-
-            # Send initial response
             yield f"data: {json.dumps({'type': 'start', 'request_id': request_id, 'message': 'Starting travel planning...'})}\n\n"
 
-            # Store request info
             active_requests[request_id] = {
                 "status": "processing",
                 "start_time": datetime.utcnow(),
                 "user_input": request.user_input
             }
 
-            # Custom streaming function that yields updates
             final_plan = await stream_travel_planning(request.user_input, request_id)
 
-            # Send final response
-            yield f"data: {json.dumps({'type': 'complete', 'request_id': request_id, 'final_plan': final_plan})}\n\n"
+            if isinstance(final_plan, dict) and final_plan.get("interrupt"):
+                yield f"data: {json.dumps({'type': 'interrupt', 'request_id': request_id, 'question': final_plan['question']})}\n\n"
+            else:
+                yield f"data: {json.dumps({'type': 'complete', 'request_id': request_id, 'final_plan': final_plan})}\n\n"
 
-            # Clean up
             active_requests.pop(request_id, None)
 
         except Exception as e:
@@ -184,23 +157,13 @@ async def plan_trip_streaming(request: StreamingTravelRequest):
 
     return StreamingResponse(
         generate_streaming_response(),
-        media_type="text/plain",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "Content-Type": "text/event-stream"
-        }
+        media_type="text/event-stream"
     )
 
-
-async def stream_travel_planning(user_input: str, request_id: str) -> str:
-    """
-    Custom streaming function that provides updates during travel planning.
-    """
-    # Generate a unique thread ID
+# Streaming logic with interrupt support
+async def stream_travel_planning(user_input: str, request_id: str) -> Any:
     thread_id = str(uuid.uuid4())
 
-    # Initialize the state with user input
     initial_state = {
         'thread_id': thread_id,
         "user_input": user_input,
@@ -215,37 +178,85 @@ async def stream_travel_planning(user_input: str, request_id: str) -> str:
         "final_plan": ""
     }
 
-    # Configuration with thread_id for the checkpointer
     config = {"configurable": {"thread_id": thread_id}}
 
-    final_result = None
-
     try:
-        # Stream updates from the graph
         async for event in travel_agent_graph.astream(initial_state, config=config, stream_mode="updates"):
             for node_name, update in event.items():
-                # Send progress updates
-                progress_message = f"Processing: {node_name.replace('_', ' ').title()}"
-                # Note: In a real streaming implementation, you'd yield these updates
-                # For now, we'll log them
-                logger.info(f"Request {request_id}: {progress_message}")
+                logger.info(f"Request {request_id}: {node_name} update")
+
+                if update.get("interrupt"):
+                    active_requests[request_id]["status"] = "waiting_for_user"
+                    active_requests[request_id]["interrupted_state"] = update["current_state"]
+                    active_requests[request_id]["interrupt_question"] = update.get("question", "Need more details")
+                    return {
+                        "interrupt": True,
+                        "question": update.get("question")
+                    }
 
                 if node_name == "create_final_plan" and "final_plan" in update:
-                    final_result = update["final_plan"]
+                    return update["final_plan"]
 
     except Exception as e:
-        logger.error(f"Streaming execution failed for {request_id}, falling back: {e}")
-        # Fallback to simple execution
-        final_result = await run_travel_agent_simple(user_input)
+        logger.error(f"Streaming failed for {request_id}, fallback triggered: {e}")
+        return await run_travel_agent_simple(user_input)
 
-    return final_result or "No travel plan could be generated."
+    return "No travel plan could be generated."
 
+# Resume logic after interrupt
+@app.post("/resume-trip")
+async def resume_trip(request: ResumeTripRequest):
+    request_id = request.request_id
 
+    if request_id not in active_requests:
+        raise HTTPException(status_code=404, detail="Request not found")
+
+    state = active_requests[request_id].get("interrupted_state")
+    if not state:
+        raise HTTPException(status_code=400, detail="No interrupted state available")
+
+    state["user_input"] = request.user_input
+    config = {"configurable": {"thread_id": state["thread_id"]}}
+
+    try:
+        async for event in travel_agent_graph.astream(state, config=config, stream_mode="updates"):
+            for node_name, update in event.items():
+                logger.info(f"Resuming Request {request_id}: {node_name} update")
+
+                if update.get("interrupt"):
+                    active_requests[request_id]["status"] = "waiting_for_user"
+                    active_requests[request_id]["interrupted_state"] = update["current_state"]
+                    active_requests[request_id]["interrupt_question"] = update.get("question", "Need more details")
+                    return {
+                        "status": "waiting_for_user",
+                        "question": update.get("question"),
+                        "request_id": request_id
+                    }
+
+                if node_name == "create_final_plan" and "final_plan" in update:
+                    active_requests.pop(request_id, None)
+                    return {
+                        "status": "complete",
+                        "request_id": request_id,
+                        "final_plan": update["final_plan"]
+                    }
+
+    except Exception as e:
+        logger.error(f"Error resuming travel request {request_id}: {str(e)}")
+        return {
+            "status": "error",
+            "message": str(e),
+            "request_id": request_id
+        }
+
+    return {
+        "status": "incomplete",
+        "request_id": request_id
+    }
+
+# Status endpoints
 @app.get("/request-status/{request_id}")
 async def get_request_status(request_id: str):
-    """
-    Get the status of a travel planning request.
-    """
     if request_id not in active_requests:
         raise HTTPException(status_code=404, detail="Request not found")
 
@@ -260,12 +271,8 @@ async def get_request_status(request_id: str):
         "start_time": request_info["start_time"].isoformat()
     }
 
-
 @app.get("/active-requests")
 async def get_active_requests():
-    """
-    Get all currently active requests (admin endpoint).
-    """
     current_time = datetime.utcnow()
     requests_info = []
 
@@ -275,8 +282,7 @@ async def get_active_requests():
             "request_id": req_id,
             "status": req_info["status"],
             "processing_time": processing_time,
-            "user_input": req_info["user_input"][:100] + "..." if len(req_info["user_input"]) > 100 else req_info[
-                "user_input"]
+            "user_input": req_info["user_input"][:100] + "..." if len(req_info["user_input"]) > 100 else req_info["user_input"]
         })
 
     return {
@@ -284,20 +290,13 @@ async def get_active_requests():
         "requests": requests_info
     }
 
-
 @app.post("/cancel-request/{request_id}")
 async def cancel_request(request_id: str):
-    """
-    Cancel an active travel planning request.
-    """
     if request_id not in active_requests:
         raise HTTPException(status_code=404, detail="Request not found")
 
-    # Remove from active requests
     request_info = active_requests.pop(request_id)
     processing_time = (datetime.utcnow() - request_info["start_time"]).total_seconds()
-
-    logger.info(f"Cancelled travel request {request_id} after {processing_time:.2f}s")
 
     return {
         "message": "Request cancelled successfully",
@@ -305,36 +304,11 @@ async def cancel_request(request_id: str):
         "processing_time": processing_time
     }
 
-
-# Background task for cleanup
 @app.on_event("startup")
 async def startup_event():
-    """
-    Startup tasks.
-    """
     logger.info("Goplan Travel Agent API starting up...")
-
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """
-    Cleanup tasks on shutdown.
-    """
     logger.info("Goplan Travel Agent API shutting down...")
-    # Clean up any remaining active requests
     active_requests.clear()
-
-
-
-# if __name__ == "__main__":
-#     import uvicorn
-
-#     # Run the server
-#     uvicorn.run(
-#         "main:app",  # Replace with your actual module name
-#         host="0.0.0.0",
-#         port=8000,
-#         reload=True,
-#         log_level="info"
-
-#     )
