@@ -1,16 +1,30 @@
- from pydantic_ai import Agent, RunContext
+from pydantic_ai import Agent, RunContext
 from typing import Any, List, Dict
 from dataclasses import dataclass
-import logfire
-import sys
-from goplan.backend.app.api.flightsearch_api import search_flights
-
 import os
+import httpx
+
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
 
 provider = GoogleProvider(api_key=os.getenv('GOOGLE_API_KEY'))
 model = GoogleModel('gemini-2.5-flash', provider=provider)
+
+# Static city → IATA map (expand as needed)
+city_to_iata = {
+    "london": "LON",
+    "new york": "NYC",
+    "paris": "PAR",
+    "dubai": "DXB",
+    "tokyo": "TYO",
+    "los angeles": "LAX",
+    "berlin": "BER",
+    "madrid": "MAD",
+    "rome": "ROM",
+    "sydney": "SYD"
+}
+
+AVIATIONSTACK_API_KEY = os.getenv("AVIATIONSTACK_API_KEY")  # Set this in env
 
 
 @dataclass
@@ -44,82 +58,67 @@ flight_agent = Agent(
 
 @flight_agent.tool
 async def search_flight(
-        ctx: RunContext[FlightDeps],
-        origin: str,
-        destination: str,
-        depart_date: str,
-        return_date: str,
-        budget_total: float = None
+    ctx: RunContext[FlightDeps],
+    origin: str,
+    destination: str,
+    depart_date: str,
+    return_date: str,
+    budget_total: float = None
 ) -> Dict[str, Any]:
     """
-    Search for flights between origin and destination.
-
+    Search for flights using the AviationStack API.
     Args:
-        origin: Origin city or airport name
-        destination: Destination city or airport name
-        depart_date: Departure date in YYYY-MM-DD format
-        return_date: Return date in YYYY-MM-DD format
-        budget_total: Maximum budget for flights (optional)
+        origin: Origin city name
+        destination: Destination city name
+        depart_date: Departure date (not used in API directly)
+        return_date: Return date (not used in API directly)
+        budget_total: Budget limit (optional, not used here)
     """
+    origin_code = city_to_iata.get(origin.lower())
+    dest_code = city_to_iata.get(destination.lower())
+
+    if not origin_code or not dest_code:
+        return {
+            "error": f"Invalid city name(s): origin='{origin}', destination='{destination}'",
+            "data": []
+        }
+
     try:
-        # Call the flight search API
-        response = search_flights(
-            origin_name=origin,
-            destination_name=destination,
-            depart_date=depart_date,
-            return_date=return_date,
-            max_price=budget_total if budget_total else None
-        )
+        url = f"http://api.aviationstack.com/v1/flights"
+        params = {
+            "access_key": AVIATIONSTACK_API_KEY,
+            "dep_iata": origin_code,
+            "arr_iata": dest_code,
+            "limit": 6
+        }
+        response = httpx.get(url, params=params)
+        res_json = response.json()
 
-        # Check if there's an error in the response
-        if "error" in response:
-            return {"error": response["error"], "data": []}
+        flights = res_json.get("data", [])
+        if not flights:
+            return {"message": "No flights found.", "data": []}
 
-        flights = response.get("data", [])
-
-        # Sort flights by preferred airlines if specified
-        if ctx.deps.preferred_airlines:  # Fixed: was preferred_airline (singular)
-            preferred_set = set(code.upper() for code in ctx.deps.preferred_airlines)
-
-            def has_preferred_airline(flight):
-                """Check if flight has any preferred airline"""
-                for itinerary in flight.get("itineraries", []):
-                    for segment in itinerary.get("segments", []):
-                        carrier_code = segment.get("carrierCode", "").upper()
-                        if carrier_code in preferred_set:
-                            return True
-                return False
-
-            # Sort flights - preferred airlines first
-            flights.sort(key=lambda f: (0 if has_preferred_airline(f) else 1))
-
-        # Format the response for better readability
         formatted_flights = []
-        for flight in flights[:6]:  # Limit to top 6 results
-            try:
-                price = flight.get("price", {}).get("total", "N/A")
-                currency = flight.get("price", {}).get("currency", "USD")
+        for f in flights:
+            airline = f.get("airline", {}).get("name", "N/A")
+            flight_num = f.get("flight", {}).get("number", "N/A")
+            dep = f.get("departure", {})
+            arr = f.get("arrival", {})
 
-                # Extract outbound and return flight details
-                outbound = flight.get("itineraries", [{}])[0]
-                return_flight = flight.get("itineraries", [{}])[1] if len(flight.get("itineraries", [])) > 1 else None
-
-                formatted_flight = {
-                    "price": f"{price} {currency}",
-                    "outbound": format_itinerary(outbound) if outbound else None,
-                    "return": format_itinerary(return_flight) if return_flight else None,
-                    "raw_data": flight  # Keep original data for detailed processing
-                }
-                formatted_flights.append(formatted_flight)
-            except Exception as e:
-                # Skip malformed flight data but log the issue
-                print(f"Warning: Could not format flight data: {e}")
-                continue
+            formatted = {
+                "airline": airline,
+                "flight_number": flight_num,
+                "departure_airport": dep.get("airport", "N/A"),
+                "departure_time": dep.get("scheduled", "N/A"),
+                "arrival_airport": arr.get("airport", "N/A"),
+                "arrival_time": arr.get("scheduled", "N/A")
+            }
+            formatted_flights.append(formatted)
 
         return {
             "data": formatted_flights,
-            "total_results": len(flights),
-            "message": f"Found {len(formatted_flights)} flight options"
+            "total_results": len(formatted_flights),
+            "message": f"Found {len(formatted_flights)} flights from {origin.title()} to {destination.title()}"
         }
 
     except Exception as e:
@@ -127,32 +126,3 @@ async def search_flight(
             "error": f"Flight search failed: {str(e)}",
             "data": []
         }
-
-
-def format_itinerary(itinerary):
-    """Format itinerary data for better readability"""
-    if not itinerary:
-        return None
-
-    segments = itinerary.get("segments", [])
-    if not segments:
-        return None
-
-    first_segment = segments[0]
-    last_segment = segments[-1]
-
-    duration = itinerary.get("duration", "N/A")
-
-    return {
-        "departure": {
-            "airport": first_segment.get("departure", {}).get("iataCode", "N/A"),
-            "time": first_segment.get("departure", {}).get("at", "N/A")
-        },
-        "arrival": {
-            "airport": last_segment.get("arrival", {}).get("iataCode", "N/A"),
-            "time": last_segment.get("arrival", {}).get("at", "N/A")
-        },
-        "duration": duration,
-        "stops": len(segments) - 1,
-        "airlines": list(set(seg.get("carrierCode", "Unknown") for seg in segments))
-    }
