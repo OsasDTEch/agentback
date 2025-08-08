@@ -87,7 +87,7 @@ async def search_hotels(
     """
     Search and filter hotels based on user preferences using HotelLook API.
     """
-    hotel_data = get_hotel_list_hotellook(city, check_in, check_out, max_price)
+    hotel_data = get_hotel_list_hotellook(city, check_in, check_out)
 
     if isinstance(hotel_data, dict):
         hotel_options = hotel_data.get("data", [])
@@ -135,6 +135,7 @@ async def search_hotels(
             )
 
     return filtered_hotels
+
 
 
 
