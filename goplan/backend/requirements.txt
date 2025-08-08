@@ -7,3 +7,4 @@ logfire
 streamlit
 parsedatetime
 pydantic_ai
+logging
