@@ -20,7 +20,7 @@ city_to_iata = {
     "lisbon": "LIS", "prague": "PRG", "warsaw": "WAW", "cairo": "CAI", "lagos": "LOS",
 }
 
-AVIATIONSTACK_API_KEY = os.getenv("AVIATIONSTACK_API_KEY")  # Set this in env
+AVIATIONSTACK_API_KEY = os.getenv("AVIATIONSTACK_APIKEY")  # Set this in env
 
 
 @dataclass
@@ -122,4 +122,5 @@ async def search_flight(
             "error": f"Flight search failed: {str(e)}",
             "data": []
         }
+
 
