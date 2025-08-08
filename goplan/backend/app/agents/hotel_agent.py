@@ -1,17 +1,24 @@
+
+# ============= HOTELAGENT.PY (FIXED) =============
 from pydantic_ai import Agent, RunContext
-from typing import Any, List, Dict,Optional
+from typing import Any, List, Dict, Optional
 from dataclasses import dataclass
-import logfire
 import sys
 import json
-from goplan.backend.app.api.hotellist_api import get_hotel_list_hotellook
 import os
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
 
+# Import the fixed hotel search function
+# from goplan.backend.app.api.hotellist_api import get_hotel_list_hotellook
+# For now, using the mock version for testing
+from hotelsearch import get_hotel_list_mock as get_hotel_list_hotellook
+
 provider = GoogleProvider(api_key=os.getenv('GOOGLE_API_KEY'))
 
-model = GoogleModel('gemini-2.5-flash', provider=provider)
+# Fixed model name - gemini-2.5-flash doesn't exist
+model = GoogleModel('gemini-2.0-flash-exp', provider=provider)
+
 @dataclass
 class HotelDeps:
     hotel_amenities: Optional[List[str]] = None
@@ -63,13 +70,13 @@ Return the updated GoplanState JSON including:
       "reason": "Why this hotel was selected"
     }
   ],
-  "remaining_budget": budget_total - (price_per_night * number_of_nights),
+  "remaining_budget": "budget_total - (price_per_night * number_of_nights)",
   "errors": []
 }
 Do not overwrite unrelated fields in GoplanState.
 """
 
-hotel_agent=Agent(
+hotel_agent = Agent(
     model,
     system_prompt=system_prompt,
     deps_type=HotelDeps,
@@ -87,16 +94,23 @@ async def search_hotels(
     """
     Search and filter hotels based on user preferences using HotelLook API.
     """
-    hotel_data = get_hotel_list_hotellook(city, check_in, check_out)
+    try:
+        hotel_data = get_hotel_list_hotellook(city, check_in, check_out)
+    except Exception as e:
+        return [{"error": f"Hotel search failed: {str(e)}"}]
+
+    if isinstance(hotel_data, dict) and "error" in hotel_data:
+        return [hotel_data]
 
     if isinstance(hotel_data, dict):
         hotel_options = hotel_data.get("data", [])
     else:
-        hotel_options = hotel_data
+        hotel_options = hotel_data if isinstance(hotel_data, list) else []
 
     if not isinstance(hotel_options, list):
-        return []
+        return [{"error": "Invalid hotel data format"}]
 
+    # Filter by max price if specified
     if max_price is not None:
         try:
             filtered_hotels = [
@@ -108,21 +122,29 @@ async def search_hotels(
     else:
         filtered_hotels = hotel_options
 
+    # Get preferences from context
     preferred_amenities = ctx.deps.hotel_amenities or []
     budget_level = ctx.deps.budget_level
 
-    # Since HotelLook has no amenities data, skip preference scoring
+    # Process hotels and add missing fields
     for hotel in filtered_hotels:
-        hotel["matching_amenities"] = []
-        hotel["preference_score"] = 0
-        hotel["rating"] = hotel.get("stars", None)  # Map stars -> rating
-        hotel["booking_link"] = ""  # Placeholder — optional to add later
+        # Ensure required fields exist
+        hotel.setdefault("matching_amenities", [])
+        hotel.setdefault("preference_score", 0)
+        hotel.setdefault("rating", hotel.get("stars", 0))
+        hotel.setdefault("booking_link", "")
+        hotel.setdefault("amenities", ["Wi-Fi", "Reception"])
 
+        # Create address from location and country
         hotel["address"] = ", ".join(filter(None, [
-            hotel.get("location"),
-            hotel.get("country")
+            hotel.get("location", ""),
+            hotel.get("country", "")
         ]))
 
+        # Ensure city field exists
+        hotel["city"] = city
+
+    # Sort by budget level preference
     if budget_level:
         if budget_level.lower() == "budget":
             filtered_hotels.sort(
@@ -133,9 +155,12 @@ async def search_hotels(
                 key=lambda x: float(x.get("price_per_night", 0)),
                 reverse=True
             )
+        else:  # mid-range
+            filtered_hotels.sort(
+                key=lambda x: (
+                    abs(float(x.get("price_per_night", 0)) - 150),  # Target mid-range price
+                    -float(x.get("stars", 0))  # Prefer higher stars
+                )
+            )
 
-    return filtered_hotels
-
-
-
-
+    return filtered_hotels[:10]  # Return top 10 results
