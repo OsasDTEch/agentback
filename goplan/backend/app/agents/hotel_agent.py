@@ -4,8 +4,7 @@ from dataclasses import dataclass
 import logfire
 import sys
 import json
-from goplan.backend.app.api.hotellist_api import search_hotels_combined
-
+from goplan.backend.app.api.hotellist_api import get_hotel_list_hotellook
 import os
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
@@ -136,4 +135,5 @@ async def search_hotels(
             )
 
     return filtered_hotels
+
 
